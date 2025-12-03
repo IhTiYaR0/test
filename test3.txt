@@ -1,0 +1,405 @@
+
+МОДУЛЬ B — РЕАГИРОВАНИЕ НА ИНЦИДЕНТЫ
+===================================
+Документация: пошагово, понятным языком, с командами и примерами кода (Python).
+Цель: дать участнику полный набор процедур, команд, инструментов и шаблонов действий для расследования инцидента — сбор артефактов, форензика трафика, анализ логов, построение временной линии, оценка ущерба и подготовка отчёта по NIST SP 800-61.
+
+Структура документа:
+1. Краткий обзор процесса (NIST SP 800-61)
+2. Предварительная подготовка и чеклист сбора артефактов
+3. Сбор и сохранение улик (Windows / Linux / Сеть / Веб)
+4. Анализ логов — какие логи за что отвечают (карта по сервисам)
+5. Анализ сетевого трафика (Wireshark / tshark / Zeek / Suricata)
+6. Дисковая и память-ориентированная форензика (dd, sleuthkit, volatility)
+7. Индикаторы компрометации (IOC) и их извлечение (YARA, regex, Python)
+8. Построение временной линии (timeline) — автоматизация и примеры
+9. Оценка ущерба и план восстановления
+10. Подготовка отчёта для руководства — шаблоны
+11. Примеры команд и полезные скрипты (Python)
+12. Шаблон chain-of-custody и заметки по безопасности тестирования
+
+-----------------------------
+1) Процесс реагирования (NIST SP 800-61, упрощённо)
+ - Preparation (Подготовка): политики, доступы, инструменты, образы для анализа, список контактов.
+ - Detection and Analysis (Обнаружение и анализ): собрать лог-файлы, pcap, сигнатуры, идентифицировать тип атаки.
+ - Containment, Eradication and Recovery (Локализация, устранение, восстановление): временные и окончательные меры, восстановление из бэкапов.
+ - Post-Incident Activity (После инцидента): отчёт, уроки, улучшение процедур.
+
+В этом модуле B ожидается: быстрый и точный форензик, корректная временная линия, оценка масштаба и грамотные рекомендации на основе NIST.
+
+-----------------------------
+2) Подготовка & чеклист (до начала расследования)
+ - Получить официальное разрешение/скоуп, список IP/hostnames, контакты.
+ - Подготовить изолированную рабочую станцию (Kali/адекватная forensic VM) с доступом к артефактам.
+ - Инструменты (установлены и протестированы): Wireshark/tshark, tcpdump, Zeek, Suricata, Volatility/volatility3, sleuthkit (fls, icat), bulk_extractor, hashdeep, md5sum/sha256sum, ewf-tools, autopsy, strings, yara, python3, jq, tshark, ss, lsof, netstat, grep/awk/sed, sqlite3.
+ - Создать папку evidence/, включить журнал действий (commands.log) и сохранить исходные файлы в readonly режиме (если возможно — сделать bit-for-bit копию).
+ - Chain-of-custody: фиксируйте кто, когда, что сохранён (форма ниже).
+
+-----------------------------
+3) Сбор и сохранение улик (команды и примеры)
+Общие принципы: минимально вмешивайтесь в систему, работайте с копиями, документируйте всё, используйте подписанные хеши для доказательства целостности.
+
+3.1. Linux (при доступе к хосту)
+# Собрать информацию о системе
+sudo hostnamectl > evidence/host_info.txt
+sudo uname -a >> evidence/host_info.txt
+sudo date -R > evidence/date.txt
+# Снимок активных процессов и сетевых соединений
+sudo ps auxww > evidence/ps_aux.txt
+sudo ss -tunap > evidence/ss_tunap.txt
+sudo netstat -tunp > evidence/netstat_tunp.txt || true
+sudo lsof -Pn > evidence/lsof.txt
+# Журналы systemd / syslog
+sudo journalctl --no-pager --since "2025-01-01" > evidence/journalctl_full.txt
+sudo cp -a /var/log/auth.log evidence/ || true
+sudo cp -a /var/log/syslog evidence/ || true
+sudo cp -a /var/log/messages evidence/ || true
+# Конфигурации веб/служб
+sudo cp -a /etc/nginx/nginx.conf evidence/etc_nginx_conf || true
+sudo cp -a /etc/apache2/apache2.conf evidence/etc_apache2_conf || true
+# Метаданные файлов и хэши
+sudo find / -type f -mtime -7 -exec ls -l {} \; > evidence/recent_files.txt 2>/dev/null || true
+sudo find / -type f -mtime -7 -exec sha256sum {} \; > evidence/recent_files_hashes.sha256 2>/dev/null || true
+# Сохранение памяти (если разрешено) — используйте LiME (для Linux)
+# (пример использования LiME kernel module — требует подготовки). Вместо этого можно использовать lkcdump или другой approved tool.
+# Сохранение диска (бит в бит):
+sudo dd if=/dev/sda of=/evidence/disk_image.dd bs=4M conv=sync,noerror status=progress
+# Или dc3dd
+sudo dc3dd if=/dev/sda of=/evidence/disk_image.dd hash=sha256 log=/evidence/dc3dd.log
+
+3.2. Windows (если цель — Windows host)
+# PowerShell (запустить от имени администратора)
+Get-WmiObject -Class Win32_ComputerSystem | Out-File -FilePath C:\evidence\host_info.txt
+systeminfo > C:\evidence\systeminfo.txt
+whoami /all > C:\evidence\whoami.txt
+# Процессы и сетевые подключения
+tasklist /V > C:\evidence\tasklist.txt
+netstat -ano > C:\evidence\netstat_ano.txt
+# Журналы Windows Event (Экспорт последних 7 дней)
+wevtutil qe Security /q:"*[System[(TimeCreated[timediff(@SystemTime) &lt;= 604800000])]]" /f:text > C:\evidence\Security_events_last7days.txt
+wevtutil qe System /q:"*[System[(TimeCreated[timediff(@SystemTime) &lt;= 604800000])]]" /f:text > C:\evidence\System_events_last7days.txt
+# Sysmon (если установлен) — экспортировать события Sysmon
+wevtutil qe "Microsoft-Windows-Sysmon/Operational" /f:text > C:\evidence\sysmon.txt
+# Собрать автозагрузки и реестр (частично)
+reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" C:\evidence\run_keys.reg /y
+# Сохранение памяти (если разрешено) — использовать DumpIt или WinPmem
+winpmem -o C:\evidence\memory.raw
+# Снятие диска (if possible) — использовать FTK Imager или dd от Linux live
+
+3.3. Сеть и пакеты
+# Если у вас есть доступ к сетевому трафику — сохраняйте pcap
+sudo tcpdump -i any -s 0 -w evidence/capture_full.pcap
+# Ограниченный capture (например, web ports)
+sudo tcpdump -i any -s 0 port 80 or port 443 or port 22 -w evidence/capture_web.pcap
+# Сниффинг short capture с помощью tshark
+sudo tshark -i any -f "tcp" -w evidence/tcp_only.pcap
+
+3.4. Веб и приложения
+# Скопировать логи веб-сервера (apache, nginx)
+sudo cp /var/log/nginx/access.log evidence/nginx_access.log || true
+sudo cp /var/log/nginx/error.log evidence/nginx_error.log || true
+sudo cp /var/log/apache2/access.log evidence/apache_access.log || true
+sudo cp /var/log/apache2/error.log evidence/apache_error.log || true
+# Логи приложения (обычно в /var/log или /opt/app/logs)
+sudo cp -a /opt/app/logs evidence/app_logs || true
+
+# Хэширование всех собранных артефактов (для chain-of-custody)
+cd evidence
+sha256sum * > evidence_hashes.sha256
+
+-----------------------------
+4) Какие логи за что отвечают — карта (очень полезно для Module B)
+(обозначения: путь на Linux/Unix и эквивалент/описание для Windows)
+
+Системные логи:
+ - /var/log/auth.log или /var/log/secure — аутентификация/ssh/логины (Linux). Windows: Security Event Log (ID 4624, 4625 — logon/logoff).
+ - /var/log/syslog или /var/log/messages — системные события/демоны/сервисные сообщения. Windows: System Event Log (System).
+ - journalctl (systemd) — агрегат systemd-событий.
+
+Веб-серверы:
+ - /var/log/nginx/access.log — HTTP доступы (IP, URL, код, user-agent, referrer).
+ - /var/log/nginx/error.log — ошибки обработки запросов, внутренние ошибки сервера.
+ - /var/log/apache2/access.log — аналогично для Apache.
+ - IIS: %SystemDrive%\inetpub\logs\LogFiles\W3SVC... — лог доступа IIS.
+
+Приложения / API:
+ - /var/log/<app>/app.log — application-specific лог (часто JSON). Часто содержит ошибки, stack traces, user actions.
+ - Windows: приложения пишут в Application Event Log.
+
+Аудит и OS-level (SELinux, auditd):
+ - /var/log/audit/audit.log — SELinux/auditd events (sudo usage, file access audit). Windows: Audit logs + Advanced Audit Policy.
+
+Сетевой уровень:
+ - PCAP файлы (capture_full.pcap) — сырые пакеты. Используются для глубокого анализа с Wireshark.
+ - Zeek logs (conn.log, http.log, dns.log) — удобны для быстрого обзора сессий и HTTP/DNS активностей.
+ - Suricata/IDS alerts — сигнатуры сработавшие по трафику (alerts.log, eve.json).
+
+Аутентификация и идентификация пользователей:
+ - /var/log/secure, /var/log/auth.log — ssh auth, sudo. Windows: Security log, Event IDs (4624 — вход, 4625 — неудачный вход, 4672 — special privileges).
+
+Процедура поиска релевантных логов:
+ - Определить время инцидента (T0) — использовать первые индикаторы (alert, user report).
+ - Собирать логи +/- 48 часов вокруг T0 (или больше) для построения контекста.
+ - Конвертировать временные зоны в UTC и нормализовать метки времени.
+
+-----------------------------
+5) Анализ сетевого трафика (Wireshark / tshark / Zeek / Suricata)
+Инструменты: Wireshark (GUI), tshark (CLI), Zeek (Bro), Suricata (IDS), capshark-like utilities.
+
+5.1. Первичный обзор pcap
+# Обзор в tshark: top talkers (IP), портов, протоколов
+tshark -r evidence/capture_full.pcap -q -z io,stat,0,ip
+tshark -r evidence/capture_full.pcap -q -z conv,ip
+# Вывести HTTP запросы в readable виде
+tshark -r evidence/capture_full.pcap -Y http.request -T fields -e ip.src -e ip.dst -e http.request.method -e http.request.uri -e http.user_agent
+# Извлечь файлы из pcap (HTTP objects)
+tshark -r evidence/capture_full.pcap --export-objects "http,./evidence/http_objs"
+# Фильтры Wireshark (display filters)
+# Примеры: ip.addr == 198.51.100.10 && tcp.port == 80
+# DNS suspicious: dns.qry.name contains "exfil"
+# HTTP status codes: http.response.code == 500
+
+5.2. Zeek (Bro) — быстрая обработка pcap в лог форматы
+# Запуск Zeek на pcap:
+zeek -r evidence/capture_full.pcap
+# Результат: conn.log, http.log, dns.log, files.log, ssl.log и др.
+# Анализ conn.log:
+cat conn.log | bro-cut id.orig_h id.resp_h proto service duration orig_bytes resp_bytes
+# Поиск сессий к подозрительным хостам
+grep "198.51.100.10" conn.log
+
+5.3. Suricata/Eve JSON
+# Запуск Suricata на pcap
+suricata -r evidence/capture_full.pcap -l evidence/suricata_output
+# eve.json содержит события, HTTP/DNS/alerts — удобно для jq фильтрации
+jq '. | select(.alert)' evidence/suricata_output/eve.json
+
+5.4. YARA для вредоносных payloads
+# Запуск yara по извлечённым файлам
+yara -r rules.yar evidence/http_objs/
+
+-----------------------------
+6) Дисковая и память-ориентированная форензика
+Инструменты: sleuthkit (fls, icat, mmls), autopsy, bulk_extractor, volatility/volatility3, strings, exiftool, hashdeep.
+
+6.1. Дисковая форензика
+# Создание образа (см. выше dd/dc3dd)
+# Просмотр разделов
+sudo mmls /evidence/disk_image.dd > evidence/mmls.txt
+# Список файлов и структуры (fls)
+sudo fls -r -m / /evidence/disk_image.dd > evidence/fls.txt
+# Извлечение файла по inode (icat)
+sudo icat /evidence/disk_image.dd <inode> > evidence/extracted_file.bin
+# bulk_extractor — поиск email, url, credit cards, x509, hashes
+bulk_extractor -o evidence/bulk_out /evidence/disk_image.dd
+
+6.2. Память (RAM) форензика — Volatility / volatility3
+# Если есть memory.raw
+volatility -f evidence/memory.raw --profile=Win10x64 pslist
+volatility -f evidence/memory.raw --profile=Win10x64 netscan
+volatility -f evidence/memory.raw --profile=Win10x64 malfind
+# volatility3 пример (python module)
+python3 -m volatility3 -f evidence/memory.raw windows.pslist.PsList
+# Извлечение строк, сетевых сокетов, процессов, модулей, dll, паролей (при наличии слотов)
+volatility -f evidence/memory.raw --profile=Win10x64 yarascan -Y rules.yar
+
+# IMPORTANT: для Volatility надо знать профиль ОС, можно попробовать volatility3 с auto-detect
+
+-----------------------------
+7) IOC (Indicators of Compromise) — как извлекать и что искать
+ - Типичные IOC: IP адреса C2, домены, URL, MD5/SHA1/SHA256 хэши файлов, регистры реестра автозагрузки, имена процессов, mutexes.
+ - Инструменты для извлечения: grep/egrep, re в Python, bulk_extractor, yara, zeek files.log
+
+Пример регулярных выражений (bash/python):
+# IPs
+egrep -o '([0-9]{1,3}\.){3}[0-9]{1,3}' evidence/*.log | sort -u > evidence/iocs_ips.txt
+# URLs
+egrep -o '(http|https)://[^ ]+' evidence/*.log | sort -u > evidence/iocs_urls.txt
+# Hashes (sha256)
+egrep -o '[a-fA-F0-9]{64}' evidence/* | sort -u > evidence/iocs_hashes.txt
+
+Python-скрипт для извлечения IOC (пример в разделе "скрипты")
+
+-----------------------------
+8) Построение временной линии (timeline)
+Цель: нормализовать все события (логи, pcap, события памяти) в единый временной формат и отсортировать по времени.
+ - Рекомендуемая временная рамка: T0 ± 48-72 часов, или дольше если требуется.
+ - Используем UTC для нормализации.
+
+8.1. Подходы
+ - Экспортировать логи в CSV (timestamp, source, host, event_type, details)
+ - Объединить CSV-файлы и отсортировать по timestamp
+ - Визуализация: Timesketch, Plaso (log2timeline + pinfo + psort), Elastic + Kibana.
+
+8.2. Пример: log2timeline/plaso
+# Создать timeline в plaso
+log2timeline.py evidence/plaso.dump evidence/
+# Просмотреть с помощью pinfo / psort
+psort.py -o l2tcsv -w evidence/timeline.csv evidence/plaso.dump
+
+8.3. Простой Python-скрипт (объединить CSVы по timestamp) — пример см. в разделе "скрипты".
+
+-----------------------------
+9) Оценка ущерба и план восстановления
+ - Оценка масштаба: количество затронутых хостов, учетных записей, объема утекших данных (PII, финансовая информация).
+ - Определите root cause — уязвимость, фишинг, неправильно настроенная служба.
+ - Containment (локализация):
+   * Краткосрочная: изоляция хоста, блокировка IP/URL на firewall, смена учетных паролей/ключей, останов сервиса.
+   * Долгосрочная: патчи, пересборка инфрастуктуры, внедрение MFA, изменение политики доступа.
+ - Eradication (искоренение): удалить бэкдоры, вредоносные файлы, откатить изменения (из известных clean backups).
+ - Recovery: восстановление из бэкапов, тестирование integrity, упрощённый очередной мониторинг.
+ - Документировать все шаги, создавать чек-листы восстановления и верификации.
+
+-----------------------------
+10) Подготовка отчёта для руководства (структура)
+ - Executive Summary (коротко: что случилось, время, масштабы, краткое влияние, текущее состояние)
+ - Техническое резюме (Timeline, PoC, IOC)
+ - Оценка ущерба (какие данные/системы затронуты)
+ - Действия, предпринятые во время и после (Containment, Eradication, Recovery)
+ - Рекомендации (patches, policies, monitoring, user training)
+ - Приложения: логи, pcap, хэши, скриншоты, CVSS (если уместно)
+
+-----------------------------
+11) Полезные команды (сводный список) — Kali / Linux / Windows
+
+11.1. Сетевая разведка и capture
+sudo tcpdump -i any -s 0 -w evidence/capture_full.pcap
+sudo tshark -r evidence/capture_full.pcap -q -z io,stat,0,ip
+tshark -r evidence/capture_full.pcap -Y http.request -T fields -e ip.src -e ip.dst -e http.request.uri
+
+11.2. Zeek/Suricata
+zeek -r evidence/capture_full.pcap
+suricata -r evidence/capture_full.pcap -l evidence/suricata_output
+
+11.3. Логи веб/серверов
+sudo cp /var/log/nginx/access.log evidence/ || true
+sudo cp /var/log/apache2/access.log evidence/ || true
+awk '{print $1,$4,$5,$6,$7,$9}' evidence/nginx_access.log | head -n 50
+
+11.4. Windows — Event logs / memory
+wevtutil qe Security /q:"*[System[(TimeCreated[timediff(@SystemTime) &lt;= 604800000])]]" /f:text > C:\evidence\Security_last7days.txt
+winpmem -o C:\evidence\memory.raw
+
+11.5. Hashing / подтверждение целостности
+sha256sum evidence/* > evidence/evidence_hashes.sha256
+md5sum evidence/* > evidence/evidence_hashes.md5
+
+11.6. Disk forensics
+sudo mmls /evidence/disk_image.dd > evidence/mmls.txt
+sudo fls -r -m / /evidence/disk_image.dd > evidence/fls.txt
+bulk_extractor -o evidence/bulk_out /evidence/disk_image.dd
+
+11.7. Volatility
+volatility -f evidence/memory.raw --profile=Win10x64 pslist > evidence/vol_pslist.txt
+volatility -f evidence/memory.raw --profile=Win10x64 netscan > evidence/vol_netscan.txt
+
+11.8. Поиск IOC
+egrep -o '([0-9]{1,3}\.){3}[0-9]{1,3}' evidence/*.log | sort -u > evidence/iocs_ips.txt
+egrep -o '(http|https)://[^ ]+' evidence/*.log | sort -u > evidence/iocs_urls.txt
+
+-----------------------------
+12) Полезные Python-скрипты (примерные, понятные) — сохраняются в evidence/scripts/
+
+# 1) extract_iocs.py — извлекает IP, URLs и хэши из текстовых логов
+import re, sys, os, json
+def extract_iocs(log_dir='evidence', out_dir='evidence/iocs'):
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    ip_re = re.compile(r'([0-9]{1,3}\.){3}[0-9]{1,3}')
+    url_re = re.compile(r'(http|https)://[^\s\'"]+')
+    sha256_re = re.compile(r'\b[a-fA-F0-9]{64}\b')
+    ips=set(); urls=set(); hashes=set()
+    for fname in os.listdir(log_dir):
+        path=os.path.join(log_dir,fname)
+        if os.path.isfile(path):
+            try:
+                with open(path,'r',errors='ignore') as f:
+                    for line in f:
+                        for ip in ip_re.findall(line):
+                            ips.add('.'.join(ip[0:4]) if isinstance(ip, tuple) else ip)
+                        for url in url_re.findall(line):
+                            urls.add(url)
+                        for h in sha256_re.findall(line):
+                            hashes.add(h)
+            except Exception as e:
+                pass
+    with open(os.path.join(out_dir,'ips.txt'),'w') as f: f.write('\\n'.join(sorted(ips)))
+    with open(os.path.join(out_dir,'urls.txt'),'w') as f: f.write('\\n'.join(sorted(urls)))
+    with open(os.path.join(out_dir,'hashes.txt'),'w') as f: f.write('\\n'.join(sorted(hashes)))
+if __name__=='__main__':
+    extract_iocs()
+
+# 2) merge_csv_timeline.py — объединяет CSV-файлы по полю timestamp и сортирует
+import csv, glob, os, datetime, sys
+def parse_iso(ts):
+    # Попытка парсинга разных форматов, возвращает объект datetime
+    for fmt in ('%Y-%m-%dT%H:%M:%S','%Y-%m-%d %H:%M:%S','%d/%b/%Y:%H:%M:%S'):
+        try:
+            return datetime.datetime.strptime(ts,fmt)
+        except:
+            pass
+    # fallback: try epoch
+    try:
+        return datetime.datetime.utcfromtimestamp(float(ts))
+    except:
+        return None
+def merge_csv(dir_in='evidence/csv_logs', out='evidence/timeline_merged.csv'):
+    rows=[]
+    for f in glob.glob(os.path.join(dir_in,'*.csv')):
+        with open(f,'r',errors='ignore') as fh:
+            reader=csv.DictReader(fh)
+            for r in reader:
+                ts=parse_iso(r.get('timestamp',r.get('time',r.get('date',''))))
+                if ts:
+                    rows.append((ts.isoformat(), r))
+    rows.sort(key=lambda x: x[0])
+    # write merged CSV with original data in 'payload' column
+    with open(out,'w',newline='') as outfh:
+        fieldnames=['timestamp','source','event_type','payload']
+        writer=csv.DictWriter(outfh,fieldnames=fieldnames)
+        writer.writeheader()
+        for ts,r in rows:
+            writer.writerow({'timestamp':ts,'source':r.get('source','unknown'),'event_type':r.get('event_type','log'),'payload':json.dumps(r)})
+if __name__=='__main__':
+    merge_csv()
+
+# 3) pcap_summary.py — использует tshark для сбора summary (нужен tshark в PATH)
+import subprocess, json, sys, os
+def pcap_summary(pcap='evidence/capture_full.pcap', out='evidence/pcap_summary.json'):
+    cmd=['tshark','-r',pcap,'-q','-z','io,stat,0,COUNT']
+    try:
+        p=subprocess.check_output(cmd,stderr=subprocess.STDOUT).decode(errors='ignore')
+    except Exception as e:
+        p=str(e)
+    with open(out,'w',encoding='utf-8') as f:
+        f.write(p)
+if __name__=='__main__':
+    pcap_summary()
+
+-----------------------------
+13) Chain-of-Custody (шаблон)
+ - Case ID: ____________________
+ - Evidence ID: ____________________
+ - Описание: ____________________
+ - Собрано кем: ____________________ (имя/роль)
+ - Дата/время сбора: ____________________ (UTC)
+ - Метод сбора: dd/tcpdump/wevtutil/...
+ - Хеш (sha256): ____________________
+ - Хранение (место): ____________________
+ - Подпись лица, собравшего: ____________________
+
+-----------------------------
+14) Рекомендации по безопасности тестирования (этические/правовые)
+ - Не выполняйте destructive payloads без явного разрешения.
+ - Работайте в пределах scope (IP, hostnames, time window).
+ - Не публикуйте чувствительные данные третьим лицам.
+ - При возможности, используйте копии систем для тестов (imaging).
+
+-----------------------------
+15) Примечания и доп. материалы
+ - Для сложных timeline/визуализаций используйте Timesketch (https://github.com/google/timesketch) + plaso.
+ - Для live ответов — интеграция с SIEM (Splunk/Elastic) сильно облегчает анализ.
+ - Если необходимо, могу сгенерировать готовый шаблон отчёта в Markdown/PDF и CSV-шаблоны для timeline.
+
+-----------------------------------------
+Конец документа.
