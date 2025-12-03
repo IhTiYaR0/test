@@ -1,0 +1,336 @@
+
+OWASP Top 10:2025 — Руководство по тестированию (Kali Linux)
+-----------------------------------------------------------------
+Источник и версия OWASP Top 10:2025 (Release Candidate). Обратите внимание на официальную страницу OWASP Top 10:2025 RC1 — она использована как опора при подготовке команд и проверок. (см. OWASP Top10:2025 RC1).
+
+Список категорий A01..A10 (OWASP Top 10:2025):
+A01:2025 - Broken Access Control
+A02:2025 - Security Misconfiguration
+A03:2025 - Software Supply Chain Failures
+A04:2025 - Cryptographic Failures
+A05:2025 - Injection
+A06:2025 - Insecure Design
+A07:2025 - Authentication Failures
+A08:2025 - Software or Data Integrity Failures
+A09:2025 - Logging & Alerting Failures
+A10:2025 - Mishandling of Exceptional Conditions
+
+Общие рекомендации перед началом:
+ - Убедитесь в наличии письменного разрешения на тестирование (scope, IP, временные рамки, контакт).
+ - Работайте в изолированной сети/лаборатории — все тесты будут выполняться локально на предоставленном IP/сети.
+ - Делайте бэкапы и используйте ненарушающих правила методик, если цель — проверка в рабочей среде.
+ - Логируйте все действия (time, команда, результат).
+ - Kali Linux и набор инструментов: nmap, masscan, burpsuite, gobuster, ffuf, nikto, dirb, wfuzz, sqlmap, sqlmap, hydra, nikto, nikto, nikto (и др.), trivy, syft, snyk, bandit, gosec, testssl.sh, sslyze, openssl, curl, socat, nc, tcpdump, mitmproxy, amass, subfinder, wfuzz, wfuzz, john, hashcat, metasploit-framework (иногда для валидации), etc.
+ - В этом файле: для каждой категории приведено до 20 полезных команд/инструментов и краткое объяснение как интерпретировать результаты.
+
+--------------------
+A01:2025 — Broken Access Control
+Кратко: Неправильные или отсутствующие проверки авторизации/доступа (например: IDOR, привилегии, SSRF в прошлых версиях объединено сюда).
+Цель теста: найти возможности обхода авторизации, доступ к чужим данным, привилегированным операциям.
+
+Команды (Kali / инструменты)
+1) nmap -sS -p- -T4 -Pn <IP>               # сканирование всех портов
+2) nmap -sV -p80,443,8080 --script=http-auth-finder <IP>  # поиск механизмов аутентификации/авторизации
+3) nikto -host http://<IP>                 # базовый web vuln scan (инфо о авторизации)
+4) gobuster dir -u http://<IP>/ -w /usr/share/wordlists/dirb/common.txt -t 50  # поиск скрытых директорий/панелей
+5) ffuf -u http://<IP>/FUZZ -w /usr/share/wordlists/dirb/common.txt -t 50
+6) burpsuite (proxy) + manual tampering   # перехват запросов, изменение параметров id, role, headers
+7) curl -i -s -k -X GET "http://<IP>/resource/123" -H "Cookie: session=..."  # проверить доступ к чужим ID
+8) curl -X POST "http://<IP>/admin/action" -d "id=123" -H "Authorization: Bearer <token>"  # попытка привилегированных действий
+9) sqlmap -u "http://<IP>/item?id=1" --dbs --batch  # проверить инъекции, которые могут привести к обходу контроля
+10) wfuzz -c -w /usr/share/wordlists/fasttrack.txt --hc 404 "http://<IP>/api/users/FUZZ"  # тест IDOR по списку
+11) hydra -l admin -P /usr/share/wordlists/rockyou.txt http-post-form "/login:username=^USER^&password=^PASS^:F=incorrect" -t 16 -V
+12) john --show --wordlist=/usr/share/wordlists/rockyou.txt hashfile  # проверить сброс паролей/перехваченные hash
+13) curl -I -s http://<IP>/admin | grep -i "WWW-Authenticate"  # узнать схему авторизации
+14) python3 -c "import requests; r=requests.get('http://<IP>/resource/1', headers={'X-Forwarded-For':'127.0.0.1'}); print(r.status_code)"  # подмена заголовков
+15) proxychains nmap -sS -p80,443 <IP>     # проверка доступности через прокси/вредоносные пути
+16) burp Intruder: автоматический fuzz полей id/role  # найти доступы через мутацию
+17) amass enum -d example.com              # (если есть домен в области) собрать поддомены — шанс найти панели
+18) curl -s "http://<IP>/users/1000" | sed -n '1,120p'  # проверить открытую информацию по ID пользователей
+19) awk '/POST|PUT|DELETE/ {print $0}' burp_requests.txt  # найти запросы, которые изменяют состояние (ручной анализ)
+20) git-dumper / custom gitextraction scripts (если доступен .git)  # поиск утечек исходников, которые показывают ACL
+
+Пояснение: последовательность от разведки (nmap, gobuster) к интерактивному тестированию (Burp, curl, wfuzz). Ищем IDOR, незадокументированные endpoints, подстановки токенов/заголовков, возможности действия от чужого имени.
+
+--------------------
+A02:2025 — Security Misconfiguration
+Кратко: Неправильные конфигурации (разрешенные директории, неверные права, оставленные тестовые страницы, привилегированные панели).
+Цель теста: найти неправильные конфиги, открытые панели, небезопасные сервисы.
+
+Команды
+1) nmap -p 1-65535 -sV -sC -T4 <IP>       # сервисная разведка + NSE скрипты
+2) testssl.sh --openssl=openssl  <IP>:443  # проверка SSL/TLS конфигурации
+3) sslyze --regular <IP>:443               # детальная проверка TLS
+4) nikto -host http://<IP>                 # поиск типичных misconfigurations
+5) curl -I http://<IP>/robots.txt          # проверка robots, .git, .env доступности
+6) gobuster dir -u http://<IP>/ -w /usr/share/wordlists/common.txt -x php,html,txt,env  # поиск файлов конфигурации
+7) ffuf -u http://<IP>/FUZZ -w /usr/share/wordlists/directory-list-2.3-medium.txt -e .env,.bak,.old
+8) nmap --script http-vhosts <IP>          # виртуальные хосты
+9) docker -H tcp://<IP>:2375 ps -a         # проверить Docker API открытый (если доступен)
+10) curl -s http://<IP>/.env | sed -n '1,80p' # попытка получить env переменные
+11) curl -I -s --insecure https://<IP>/server-status  # apache status, nginx stub_status
+12) enum4linux -a <IP>                      # samba/SMB misconfigs
+13) smbclient -L //<IP> -N                  # посмотреть общие ресурсы
+14) ldapsearch -x -h <IP> -b ""             # проверить LDAP доступ без авторизации
+15) john / hashcat на найденных паролях из конфигов (если получил)  # проверка слабых паролей
+16) docker-bench-security on host (если host доступен) # security benchmark
+17) curl -s "http://<IP>/server-status?auto" | sed -n '1,100p'  # облачные панели
+18) awscli --profile temp sts get-caller-identity  # (если dev-панель содержит креды; использовать с осторожностью)
+19) lsof -i -P -n | grep LISTEN           # (если тестируем внутренний сервер) узнать слушающие сервисы
+20) systemctl list-units --type=service   # (локально на целевом скачанном образе) проверить службы
+
+Пояснение: искать открытые панели управления, небезопасно выставленные API, конфиг-файлы, credentials в репозиториях и публичных местах. Для облачных кредов — аккуратно, не выводите в логи.
+
+--------------------
+A03:2025 — Software Supply Chain Failures
+Кратко: Уязвимости в зависимостях, сборках, CI/CD, внешних пакетов и доставке.
+Цель теста: обнаружить уязвимые/старые зависимости, отсутствие SBOM, тайные ключи в CI конфиге.
+
+Команды
+1) syft <path or image> -o json > sbom.json    # собрать SBOM (пакеты/версии)
+2) trivy fs --security-checks vuln /path       # локальное сканирование уязвимостей
+3) trivy image <IP>:5000/myimage:latest        # проверить контейнер образ
+4) snyk test --org=me --file=package.json      # проверить npm зависимости (если есть доступ к коду)
+5) pip-audit -r requirements.txt               # python зависимости
+6) npm audit --registry https://registry.npmjs.org/  # npm audit
+7) mvn dependency-check:aggregate               # maven dependency-check
+8) gosec ./...                                  # для Go проектов
+9) cargo audit                                   # Rust
+10) gh api repos/<owner>/<repo>/actions/runs --jq '.'  # проверить наличие CI и потенциальных secrets (только при доступе)
+11) jq '.artifacts[]' ci-artifacts.json          # анализ CI артефактов
+12) grep -R "AWS_ACCESS_KEY_ID" -n . || true     # поиск секретов в репозиториях
+13) git rev-list --all | while read commit; do git show $commit:somefile; done  # искать секреты/уязвимости в старых коммитах
+14) snyk monitor --org=myorg                      # мониторинг проекта
+15) ossi / other SBOM diff tools (syft + grype)  # grype для уязвимостей: grype sbom.json
+16) grype <image>                                 # скан уязвимостей образа
+17) docker trust inspect <image>                  # проверить механизмы подписи образов (если есть)
+18) cosign verify <image>                         # проверка подписи контейнера
+19) git-secrets --scan .                          # локальная проверка на секреты
+20) CI log parsing: awk '/ERROR|WARNING|CREDENTIAL|TOKEN/' ci.log  # найти утечки в логах CI
+
+Пояснение: используем SBOM и сканеры уязвимостей для поиска проблем с зависимостями. Проверяем CI/CD pipeline и артефакты на утечки секретов и неподписанные артефакты.
+
+--------------------
+A04:2025 — Cryptographic Failures
+Кратко: Неправильное использование криптографии — слабые алгоритмы, отсутствующая проверка сертификатов, хранение секретов в открытом виде.
+Цель теста: выявить слабые шифры, незашифрованные каналы, утечки ключей.
+
+Команды
+1) testssl.sh --quiet <IP>:443                  # быстрая проверка TLS
+2) sslyze --regular <IP>:443                    # детальный анализ конфигурации TLS
+3) nmap --script ssl-enum-ciphers -p 443 <IP>   # список поддерживаемых шифров
+4) openssl s_client -connect <IP>:443 -showcerts # посмотреть сертификаты
+5) openssl x509 -in cert.pem -text -noout       # анализ cert
+6) curl -vI https://<IP> --tlsv1.2               # проверить связь с TLSv1.2 принудительно
+7) openssl s_client -connect <IP>:443 -cipher 'RC4' # проверить устаревшие cipher
+8) gcore/secret scanning: grep -R "PRIVATE KEY" -n . || true  # поиск приватников в проекте
+9) ssh -v user@<IP>                             # посмотреть используемые алгоритмы SSH
+10) nmap -p 22 --script ssh2-enum-algos <IP>     # SSH algorithms
+11) sslyze --certinfo="<IP>:443"                 # детали cert chain
+12) cipherscan <IP>:443                           # ещё один TLS тест
+13) python3 -c "import ssl;print(ssl.OPENSSL_VERSION)" # версия OpenSSL на вашей машине для тестирования
+14) openssl rand -hex 32                         # сгенерировать правильный ключ для теста
+15) gpg --list-keys                               # проверить наличие GPG ключей локально (если тестируем доставку)
+16) curl --insecure https://<IP>/resource         # проверить реакции при отсутствии верификации
+17) mitmproxy                                   # попытка проанализировать трафик (с разрешением)
+18) sslyze --certinfo=example.com:443 | tee ssl_report.txt # сохранить отчет
+19) nmap --script ssl-cert -p 443 <IP>           # базовая информация о сертификате
+20) jq '.tls' ssbom.json  # (если sbom содержит tls metadata) analyze configs
+
+Пояснение: Проверяем конфигурацию TLS/SSH, сертификаты, хранение приватных ключей, слабые шифры и неправильное использование TLS (например отключенная проверка).
+
+--------------------
+A05:2025 — Injection
+Кратко: SQL, NoSQL, OS, LDAP и другие инъекции.
+Цель теста: обнаружить точки ввода, подверженные инъекциям.
+
+Команды
+1) sqlmap -u "http://<IP>/page?id=1" --batch --dbs  # автоматическое тестирование SQLi
+2) sqlmap -u "http://<IP>/page?id=1" --crawl=2 --batch
+3) ffuf -u "http://<IP>/search?q=FUZZ" -w payloads/sqli.txt -H 'User-Agent: fuzz'  # brute-force payloads
+4) burpsuite active scan + payloads                 # Burp Scanner/Intru­der
+5) commix --url="http://<IP>/vuln.php?cmd=1" --batch  # тест OS command injection
+6) curl "http://<IP>/page?id=1' OR '1'='1"           # простая проверка SQLi (в тестовой среде)
+7) mongo-express probing for NoSQL injection         # если есть mongo exposed
+8) grep -R "exec(" -n . | sed -n '1,120p'           # поиск потенциально опасных вызовов (локально)
+9) nmap --script http-sqli --script-args=unsafe=1 -p80 <IP> # NSE sqli checks
+10) wfuzz -c -z file,payloads/sqli.txt "http://<IP>/id=FUZZ" --hc 404
+11) ldapsearch '(|(uid=*)(uid=admin))' -x -h <IP>      # LDAP injection checks
+12) xpath/test injections for XML endpoints using curl -d '<xml>..</xml>'  # XML injection tests
+13) burp intruder with payload list from OWASP broken payloads list
+14) sqlmap --os-shell -u "http://<IP>/page?id=1" --batch (только при разрешении и в тестовой среде)
+15) ncat -lvnp 4444                                 # слушать обратные шеллы (для проверки RCE при разрешении)
+16) nikto --plugins "sqli" -host http://<IP>         # быстрые проверки
+17) metasploit auxiliary/scanner/http/* modules (только в тестах с разрешением)
+18) curl -X POST http://<IP>/api -H "Content-Type: application/json" -d '{"user":"test\"; DROP TABLE users; --"}'
+19) wfuzz --hc 404 -z file,/usr/share/wordlists/raft-large-files.txt "http://<IP>/FUZZ"
+20) sqlmap -u "http://<IP>/item?id=1" --risk=3 --level=5 --batch --technique=BEUSTQ
+
+Пояснение: сначала определить потенциальные точки ввода (Burp, ffuf, gobuster), затем применить автоматические инструменты (sqlmap, commix) и только после подтверждения — более углубленные проверки. Никогда не выполнять destructive payloads в рабочей среде без разрешения.
+
+--------------------
+A06:2025 — Insecure Design
+Кратко: Проблемы архитектуры/дизайна (отсутствие threat modeling, unsafe patterns).
+Цель теста: найти проектные решения, ведущие к рискам (слабые сессии, неверное разграничение слоёв, unsafe default).
+
+Команды / шаги (часто ручные + инструменты)
+1) review threat model docs; check for STRIDE/PASTA artifacts  # ручной анализ
+2) review architecture diagrams (draw.io, mermaid)             # ручной аудит
+3) grep -R "debug=true|allowUnsafe|insecure" -n .              # найти небезопасные флаги
+4) trivy fs --config /path/to/configs                          # сканирование конфигов на insecure settings
+5) bandit -r .                                                  # python security linter
+6) semgrep --config=auto .                                      # поиск паттернов плохого дизайна
+7) gosec ./...                                                  # анализ для Go
+8) icalc / threat-modeling checklist (ручной чеклист)           # документировать риски
+9) review session logic: curl -I -s -D - http://<IP>/login     # просмотреть cookies HttpOnly/Secure/SameSite
+10) burp session handling rules to test session fixation        # тесты с фиксацией сессии
+11) check JWT usage: jwt.io debugging (local)                   # проверить срок годности и подпись JWT
+12) curl -s -D - http://<IP>/ | grep -i Set-Cookie              # проверить флаги cookie
+13) nikto to detect unsafe endpoints                            # вспомогательно
+14) review RBAC implementation: fuzz role parameter values      # тесты ролей
+15) static code scan: semgrep, spotbugs, eslint security rules  # автоматический статический анализ
+16) threat modeling workshops (с командой)                      # ручной шаг
+17) use OWASP ASVS checklist items to cross-check design        # ручная проверка
+18) map trust boundaries and simulate trust breaches (mt)       # моделирование
+19) review error handling: send malformed inputs (curl)         # проверить утечки info в ошибках
+20) document mitigation suggestions per design flaw             # результат — отчёт
+
+Пояснение: Insecure design — это меньше о скриптах и больше о документации, архитектуре и статическом анализе. Часто комбинируется с A10 (exception handling) и A09 (logging).
+
+--------------------
+A07:2025 — Authentication Failures
+Кратко: Ошибки в механизмах аутентификации (слабые пароли, недостаточная MFA, небезопасные сбросы пароля).
+Цель: проверить обход аутентификации, слабые учётные записи, отсутствие MFA, уязвимые механизмы восстановления пароля.
+
+Команды
+1) hydra -L users.txt -P /usr/share/wordlists/rockyou.txt -s 80 -f <IP> http-post-form "/login:username=^USER^&password=^PASS^:F=incorrect"
+2) burp Repeater + custom payloads для теста сброса пароля
+3) curl -X POST http://<IP>/reset-password -d "email=victim@example.com" -v  # проверить изменения пароля
+4) john --wordlist=/usr/share/wordlists/rockyou.txt hashes.txt               # атаки на хеши
+5) hashcat -a 0 -m 0 hash.txt /usr/share/wordlists/rockyou.txt              # ускоренная брутфорс атака на пароли
+6) wfuzz -c -w usernames.txt "http://<IP>/login?username=FUZZ"              # username enumeration
+7) curl -I http://<IP>/login | grep -i 'X-Frame-Options'                    # clickjacking защита
+8) samdump2 /etc/shadow (только на локальной тестовой машине)              # анализ локальной аутентификации
+9) nmap --script http-auth-finder <IP>                                      # попробовать найти auth mechanisms
+10) burp intruder: тест lockout, rate-limiting                             # обнаружение ограничений
+11) python3 -c "import requests; r=requests.post('http://<IP>/login', data={'user':'admin','pass':''}); print(r.status_code, r.text[:200])"
+12) aws-iam enumeration (если cloud target): awscli list-users (если creds)  # только при наличии прав/доступа
+13) check MFA endpoints: curl -s http://<IP>/mfa/setup | sed -n '1,120p'
+14) inspect cookies flags: curl -s -D - http://<IP>/ | grep -i Set-Cookie
+15) test password reset token predictability: request tokens and analyze format
+16) use Burp Sequencer to test entropy of session tokens
+17) check for password reuse via leaked creds (haveibeenpwned API - with care)
+18) ldapsearch -x -h <IP> -b "dc=example,dc=com" "(uid=*)" | less  # test LDAP
+19) metasploit auxiliary/scanner/http/* for auth bypass (только с разрешением)
+20) check password policy endpoints: curl -s http://<IP>/policy | sed -n '1,120p'  # если доступно
+
+Пояснение: фокус на enumeration, brute-force (удерживаться от DoS), проверка восстановления пароля, MFA и качества сессионных токенов.
+
+--------------------
+A08:2025 — Software or Data Integrity Failures
+Кратко: Подделка данных/образов/обновлений, отсутствие подписи артефактов.
+Цель: найти неподписанные пакеты, неподписанные обновления и уязвимости целостности данных.
+
+Команды
+1) cosign verify <image>                                         # проверить подпись контейнера
+2) docker trust inspect <image>                                  # проверить trust data
+3) sha256sum file.tar.gz                                          # проверить checksum
+4) curl -s http://<IP>/updates/check | sed -n '1,120p'            # посмотреть механизм обновлений
+5) grep -R "update_url" -n .                                      # найти места обновления
+6) gpg --verify release.tar.gz.sig release.tar.gz                  # проверить подпись GPG
+7) trivy image <image>                                             # проверка целостности/вулн в образе
+8) sbom/ syft + grype workflow to validate artifacts               # генерация и проверка sbom
+9) wget http://<IP>/download/package.tar.gz                       # скачать пакет и проверить подпись
+10) curl -I http://<IP>/checksum.txt                              # проверить наличие контрольных сумм
+11) python3 -c "import requests; r=requests.get('http://<IP>/update'); print(r.headers)" # посмотреть метаданные
+12) repo-audit scripts: check for typosquatting in dependencies   # анализ имен пакетов
+13) rpm -K package.rpm                                             # проверка подписи rpm
+14) dpkg-sig --verify package.deb                                  # проверка подписи deb
+15) use SBOM compare: syft + grype between versions                # найти неожиданные изменения
+16) check CI publish steps: grep -R "docker push" -n .              # найти pipeline publish
+17) cosign verify-blob --signature sig.sig artifact.bin             # verify arbitrary blobs
+18) check server for outdated update endpoints: curl -s http://<IP>/updates/ | jq .
+19) inspect HTTP headers for ETag/Last-Modified: curl -I http://<IP>/artifact
+20) audit code signing keys presence on build agents (manual check)
+
+Пояснение: целью является подтверждение, что бинарники/образы/обновления подписаны и проверяются, и нет возможности подмены или загрузки неподписанных артефактов.
+
+--------------------
+A09:2025 — Logging & Alerting Failures
+Кратко: Отсутствие логов, плохая агрегация, отсутствие триггеров на инциденты.
+Цель: проверить корректность логирования, чувствительность алертов и возможность обхода логов.
+
+Команды / проверки
+1) отправить известный маркер и проверить логи: curl -X POST http://<IP>/api -d '{"magic":"OWASP_TEST"}' && ssh to log server to grep 'OWASP_TEST'  # интеграция с логами
+2) tcpdump -i any host <IP> -w capture.pcap  # захват трафика для последующего сопоставления с логами
+3) grep -R "OWASP_TEST" /var/log/ -n || true  # поиск маркера в логах (если доступ)
+4) check logrotate и retention: cat /etc/logrotate.conf
+5) check remote logging: grep -i "rsyslog" /etc/rsyslog.conf
+6) send slow attack pattern and check for alerting (rate-limited)  # тест на алерты
+7) use elk/kibana queries to find injected events (при доступе)     # проверка индексации
+8) check for sensitive data in logs: grep -R "password" /var/log -n || true
+9) audit syslog configuration: ss -lntu | grep syslog
+10) review SIEM rules: grep -R "rule" /etc/siem -n (при доступе)
+11) ausearch -m USER_LOGIN -ts today  # auditd проверка логов входа (на целевой машине)
+12) splunk search: `index=prod "OWASP_TEST"` (если есть доступ)  # тест поиска в Splunk
+13) send malformed requests and check if logged (curl -d '{"x": "\x00"}')  # проверка логирования исключений
+14) check permission on log files: ls -l /var/log | grep -E 'root|syslog'
+15) tail -f /var/log/auth.log & then trigger login attempts  # live тестирование
+16) check for rate of missing events: correlate app logs vs network captures
+17) ensure alerts created: craft PoC that should trigger IDS/IPS and verify
+18) check cloud logging sinks: aws cloudwatch logs describe-log-groups (if creds)
+19) inspect application for structured logging usage: search for JSON logging patterns
+20) document gaps and recommend alerting thresholds and retention policy
+
+Пояснение: тесты направлены на подтверждение, что атаки/аномалии действительно записываются и генерируют оповещения; важно проверять и ретеншн и то, что логи не содержат секретов.
+
+--------------------
+A10:2025 — Mishandling of Exceptional Conditions
+Кратко: Неправильная обработка ошибок — утечка данных через стектрейсы, неверные коды ошибок, информативные сообщения.
+Цель: обнаружить утечки данных в ошибках, небезопасные сообщения об ошибках, нестабильные поведения.
+
+Команды / проверки
+1) curl -s "http://<IP>/nonexistent" -D - | sed -n '1,120p'  # посмотреть ответ 404 и body
+2) curl -X POST http://<IP>/api -d '{"bad":"\x00"}' -v         # вызвать исключение и посмотреть ответ
+3) burp: отправить malformed inputs и анализировать тело ошибки   # ручные тесты
+4) ffuf -u http://<IP>/FUZZ -w /usr/share/wordlists/dirb/common.txt --hc 200 # найти ошибки
+5) grep -R "Exception" -n /var/www || true                   # поиск стектрейсов на локальном образе
+6) grep -R "Stack trace" -n . || true
+7) curl -I http://<IP>/ | grep -i Server                      # узнать информацию о сервере (server header)
+8) send long payloads to endpoints and check for 500 responses  # тест на обработку ошибок при переполнении
+9) review app logs for stack traces after PoC input             # correlating logs
+10) run static analyzer to find thrown exceptions not handled    # semgrep, bandit
+11) test for verbose debug pages: /debug, /status, /phpinfo.php    # common debug endpoints
+12) check for default error pages revealing paths: curl http://<IP>/trigger-error | sed -n '1,200p'
+13) analyze headers for X-Powered-By                                          # вывод технологий
+14) attempt path traversal inputs and inspect error messages                # to see internal paths
+15) nmap --script http-error-500 --script-args uri=/somepath <IP>          # NSE related checks
+16) wfuzz with long payloads for causing buffer errors                      # look for 500's
+17) check for unhandled exceptions in API JSON responses                     # malformed JSON => descriptive error
+18) review framework default error handling (Django/Express configs)         # manual check
+19) test rate-limit exceeded responses (does it leak state?)                 # burst requests
+20) document all observed error messages and recommend generic, non-informative messages for prod
+
+Пояснение: направлено на то, чтобы ошибки не давали злоумышленнику внутренней информации о системе и её конфигурации.
+
+--------------------
+Фишки и заметки по инструментам
+ - Burp Suite Professional: proxy, intruder, repeater, scanner — центральный инструмент для веб-тестирования.
+ - gobuster / ffuf / dirsearch: быстрый поиск директорий и файлов.
+ - nmap + NSE: обнаружение сервисов и их основных слабостей.
+ - sqlmap / commix / wfuzz: автоматизация поиска инъекций и fuzzing.
+ - trivy / syft / grype / snyk / bandit / semgrep: сканирование зависимостей и статический анализ.
+ - sslyze / testssl.sh / openssl: криптографический анализ и проверка TLS.
+ - cosign / gpg: проверка подписей артефактов.
+ - hydra / john / hashcat: проверка силы паролей (не использовать против production без подтверждения в скоупе)
+ - tcpdump / wireshark / mitmproxy: анализ сетевого трафика при согласии.
+ - masscan: быстрое сканирование портов (использовать осторожно в пределах разрешенного скоупа).
+
+Отчётность и логирование результатов:
+ - Для каждого найденного issue укажите: CVE/CWE (если есть), risk rating, PoC (короткий), шаги воспроизведения, рекомендации по устранению.
+ - Используйте шаблон: Summary, Impact, Reproduction Steps, Evidence (скриншоты/pcap/логи), Remediation.
+ - Не выполняйте destructive payloads (DROP, rm -rf и т.п.) без явного разрешения.
+ - По возможности — используйте non-destructive techniques и read-only проверки первым этапом.
+
+---------------------------------
+Конец документа.

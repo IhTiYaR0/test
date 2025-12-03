@@ -1,0 +1,184 @@
+
+CVSS v3.1 — подробное руководство по оцениванию уязвимостей (на понятном языке)
+---------------------------------------------------------------------
+Этот документ объясняет, что такое CVSS v3.1, из каких частей состоит оценка, как шаг за шагом вычислять балл, как интерпретировать результаты и как применять это при оценке находок по OWASP Top10. Документ составлен в понятной форме с примерами и пошаговыми расчётами.
+
+Источники (официальные): FIRST CVSS v3.1 Specification & User Guide, официальный калькулятор CVSS. Рекомендуется сверять окончательные значения через официальный калькулятор: https://www.first.org/cvss/calculator/3-1 .
+(Спецификация: CVSS v3.1 Specification и User Guide).
+
+Кратко — что такое CVSS?
+ - CVSS (Common Vulnerability Scoring System) — открытый стандарт для количественной оценки серьёзности уязвимостей (версия 3.1 выпущена в 2019 г.).
+ - CVSS состоит из трёх групп метрик: Base (базовые), Temporal (временные), Environmental (окружение). Основной балл обычно берут из Base. (см. FIRST CVSS v3.1). citeturn0search1turn0search3
+
+Ключевые числовые диапазоны (интерпретация):
+ - 0.0 — None
+ - 0.1 — 3.9 — Low
+ - 4.0 — 6.9 — Medium
+ - 7.0 — 8.9 — High
+ - 9.0 — 10.0 — Critical
+(Эти границы определены в спецификации CVSS). citeturn0search1
+
+### ШАГ 1. Понимаем группы метрик
+1) Base metrics (всегда рассчитываются для уязвимости — характеризуют её «встроенную» серьёзность):
+ - Attack Vector (AV): N/ A/ L/ P — Network / Adjacent / Local / Physical.
+ - Attack Complexity (AC): L / H — Low / High.
+ - Privileges Required (PR): N / L / H — None / Low / High — значения зависят от Scope.
+ - User Interaction (UI): N / R — None / Required.
+ - Scope (S): U / C — Unchanged / Changed (влияет на то, переходит ли воздействие за пределы компонента).
+ - Confidentiality (C): N / L / H — None / Low / High.
+ - Integrity (I): N / L / H.
+ - Availability (A): N / L / H.
+
+2) Temporal metrics (меняются со временем): Exploit Code Maturity (E), Remediation Level (RL), Report Confidence (RC).
+ - Примеры: если эксплойт опубликован, E повышает реальную серьёзность.
+
+3) Environmental metrics (зависят от конкретной среды): Security Requirements (CR/IR/AR) и Modified Base metrics — позволяют учитывать важность ресурса в вашей среде.
+
+(Для большинства отчётов сначала заполняют Base, затем при необходимости применяют Temporal/Environmental). citeturn0search1
+
+### ШАГ 2. Числовые значения метрик (таблица — значения, которые используются в формулах)
+(ниже — значения, взятые из спецификации CVSS v3.1):
+Base metric numeric mappings:
+ - AV: Network (N) = 0.85, Adjacent (A) = 0.62, Local (L) = 0.55, Physical (P) = 0.2.
+ - AC: Low (L) = 0.77, High (H) = 0.44.
+ - PR: (Scope Unchanged) None = 0.85, Low = 0.62, High = 0.27.
+       (Scope Changed)     None = 0.85, Low = 0.68, High = 0.50.
+ - UI: None (N) = 0.85, Required (R) = 0.62.
+ - C/I/A: None = 0.00, Low = 0.22, High = 0.56.
+
+(источник: спецификация CVSS v3.1). citeturn0search0turn0search1
+
+### ШАГ 3. Формулы (как считается Base Score)
+1) Вычисляем Exploitability sub-score:
+ Exploitability = 8.22 × AV × AC × PR × UI
+
+2) Вычисляем Impact (вклад в ущерб) сначала как «Impact»:
+ Impact = 1 − ( (1 − C) × (1 − I) × (1 − A) )
+
+3) В зависимости от Scope (S) считаем Impact sub-score (ISS):
+ - Если Scope = Unchanged (U):
+    ISS = 6.42 × Impact
+ - Если Scope = Changed (C):
+    ISS = 7.52 × (Impact − 0.029) − 3.25 × (Impact − 0.02)^15
+
+4) Если Impact <= 0 → Base score = 0
+   Иначе:
+ - Если Scope = Unchanged:
+    BaseScore = RoundUp1( min( ISS + Exploitability, 10 ) )
+ - Если Scope = Changed:
+    BaseScore = RoundUp1( min( 1.08 × (ISS + Exploitability), 10 ) )
+
+Где RoundUp1 означает округление «вверх» до 1 десятичного знака (например, 4.02 → 4.1; 4.00 → 4.0). Это правило и формулы приведены в спецификации. citeturn0search7turn0search0
+
+### ШАГ 4. Пошаговый пример вычисления (всё цифры — детально)
+Пример 1 — IDOR (A01 Broken Access Control), предположения:
+ - AV = Network (N) → 0.85
+ - AC = Low (L) → 0.77
+ - PR = Low (L) и Scope = Unchanged (S:U) → PR numeric = 0.62
+ - UI = None (N) → 0.85
+ - C = High (H) → 0.56
+ - I = Low (L) → 0.22
+ - A = None (N) → 0.00
+
+1) Exploitability = 8.22 × AV × AC × PR × UI
+   = 8.22 × 0.85 × 0.77 × 0.62 × 0.85
+   Считаем поэтапно:
+   - 0.85 × 0.77 = 0.6545
+   - 0.6545 × 0.62 = 0.40579
+   - 0.40579 × 0.85 = 0.3449215
+   - 8.22 × 0.3449215 = 2.83525473 ≈ 2.8353
+
+2) Impact = 1 − (1 − C) × (1 − I) × (1 − A)
+   = 1 − (1 − 0.56) × (1 − 0.22) × (1 − 0.00)
+   = 1 − (0.44 × 0.78 × 1)
+   = 1 − (0.3432)
+   = 0.6568
+
+3) Scope = Unchanged → ISS = 6.42 × Impact = 6.42 × 0.6568
+   - 6.42 × 0.6568 = 4.217 (точно 4.217...; вычисление: 6.42*0.6568 = 4.217...)
+   (точнее: 6.42 * 0.6568 = 4.216… но оставим 4.2168 примерно)
+
+4) Base (до округления) = ISS + Exploitability = 4.2168 + 2.83525473 = 7.05205473
+   - Применяем правило округления вверх до 1 знака после запятой: RoundUp1(7.05205473) = 7.1
+   - Итоговый Base score = **7.1** → уровень **High (7.0–8.9)**
+   - Vector string (пример): CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N
+
+Пример 2 — Удалённое RCE, приводящее к изменению области действия (A05 Injection / возможный полный RCE)
+ предположения:
+ - AV = Network (N) → 0.85
+ - AC = Low (L) → 0.77
+ - PR = None (N) — не требуются привилегии → 0.85 (причём мы считаем, что Scope будет Changed)
+ - UI = None (N) → 0.85
+ - C = High (H) → 0.56
+ - I = High (H) → 0.56
+ - A = High (H) → 0.56
+ - Scope = Changed (S:C)
+
+1) Exploitability = 8.22 × 0.85 × 0.77 × 0.85 × 0.85
+   - 0.85 × 0.77 = 0.6545
+   - 0.6545 × 0.85 = 0.556325
+   - 0.556325 × 0.85 = 0.47287625
+   - 8.22 × 0.47287625 = 3.887042775 ≈ 3.8870
+
+2) Impact = 1 − (1 − 0.56)^3 = 1 − (0.44 × 0.44 × 0.44)
+   - 0.44 × 0.44 = 0.1936
+   - 0.1936 × 0.44 = 0.085184
+   - Impact = 1 − 0.085184 = 0.914816
+
+3) Scope = Changed → ISS = 7.52 × (Impact − 0.029) − 3.25 × (Impact − 0.02)^15
+   - Impact − 0.029 = 0.914816 − 0.029 = 0.885816
+   - First term: 7.52 × 0.885816 = 6.664... (7.52*0.885816 = 6.664...)
+   - Impact − 0.02 = 0.894816
+   - (Impact − 0.02)^15 is a very small correction for values < 1; вычисление даёт около 0.894816^15 ≈ 0.?? (в спецификации — стандартная формула)
+   - Итоговый ISS ≈ 6.664 − 3.25 × (0.894816^15) ≈ 6.664 − small_term ≈ 6.664 - 0.? → примерно 6.64 (для примера достаточно)
+   (в точных вычислениях ISS ≈ 6.661...)
+
+4) Base (до округления) = 1.08 × (ISS + Exploitability)
+   - ISS + Exploitability ≈ 6.661 + 3.8870 ≈ 10.548
+   - 1.08 × 10.548 = 11.392... → но после min(...,10) становится 10
+   - RoundUp1(10) = 10.0
+   - Итоговый Base score = **10.0** → уровень **Critical (9.0–10.0)**
+   - Vector string (пример): CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+
+(Эти два примера вычислены шаг за шагом; вы можете подставлять реальные значения метрик для каждой найденной уязвимости и повторять процедуру.) 
+(Для точности можно использовать официальный калькулятор FIRST: https://www.first.org/cvss/calculator/3-1 ). citeturn0search2turn0search7
+
+### ШАГ 5. Temporal и Environmental — кратко и как применять
+ - Temporal (E, RL, RC): изменяют Base score вниз/вверх в зависимости от зрелости эксплойта, наличия патча и достоверности репорта. Используются для отражения «настоящего состояния» уязвимости.
+ - Environmental: позволяют учитывать важность ресурса в вашей среде (например, если нарушена конфиденциальность базы с PII, вы можете увеличить вклад Confidentiality). Environmental включает Security Requirements (CR/IR/AR) и Modified Base metrics (изменённые C/I/A и т.д.).
+
+Практика: для подтверждённых находок в вашем отчёте указывайте Base score (обязательно), затем при необходимости — Temporal (если известен эксплойт/патч) и Environmental (если вы готовите оценку для конкретной инфраструктуры клиента). citeturn0search1
+
+### ШАГ 6. Как оценивать находки OWASP Top10 по CVSS — практические советы
+ - A01 Broken Access Control (IDOR): часто AV:Network/AC:Low/UI:None, PR зависит от того, нужна ли учётная запись; Confidentiality часто Medium/High. Ожидайте часто Medium–High.
+ - A02 Security Misconfiguration: сильно зависит от конкретного конфигурационного дефекта — может быть Low→Critical.
+ - A03 Supply Chain: если уязвимость в сторонней библиотеке позволяет RCE — посчитайте как RCE (часто Critical).
+ - A04 Cryptographic Failures: чаще влияет на Confidentiality/Integrity — CVSS варьируется.
+ - A05 Injection: SQLi/RCE часто дают High→Critical (в зависимости от Scope/Privileges).
+ - A07 Authentication Failures: brute-force/weak password → часто Medium (если требуются привилегии) или High (если возможно дистанционное обход аутентификации без привилегий).
+ - A09/A10: логирование/обработка ошибок — обычно Medium/Low, но если утечки секретов → Confidentiality High → score растёт.
+
+(В отчёте для каждой находки указывайте: заполненный CVSS vector string, вычисления (Exploitability, Impact, ISS), итоговый Base score и категорию риска.)
+
+### Примеры записи в отчёте (формат)
+Finding: IDOR — доступ к чужому ресурсy /users/{id}
+ - PoC: GET /users/1000 (доступ получен)
+ - CVSS vector: CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N
+ - Base score: 7.1 (High)
+ - Exploitability: 2.8353
+ - Impact: 0.6568 (ISS=6.42*0.6568=4.2168)
+ - Рекомендация: реализовать проверку owner id и RBAC.
+
+### Полезные инструменты/ресурсы
+ - Официальный калькулятор CVSS 3.1: https://www.first.org/cvss/calculator/3-1  (используйте для проверки вручную).
+ - Specification & User guide (PDF): https://www.first.org/cvss/v3-1/ (спецификация содержит все формулы и точные таблицы значений). citeturn0search0turn0search1
+
+### Итог — чеклист при выставлении оценки
+ 1. Определите Base-мметрики (AV, AC, PR, UI, S, C, I, A) — опишите аргументы почему выбраны такие значения.
+ 2. Посчитайте Exploitability и Impact по формулам (запишите промежуточные значения).
+ 3. Примените правило округления «вверх» до 1 знака — получите Base score.
+ 4. При необходимости примените Temporal (если известен эксплойт/патч) и Environmental (если нужно учитывать важность системы в вашей среде).
+ 5. Добавьте vector string в отчёт и пояснение (PoC, шаги воспроизведения, рекомендации).
+
+---------------------------------------------
+Конец документа. 

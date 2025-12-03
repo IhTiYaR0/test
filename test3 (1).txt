@@ -1,0 +1,359 @@
+
+Детальная справка по логам, pcap/pcapng, Zeek, Suricata, Nginx, Apache и другим сервисам
+======================================================================================
+Этот документ — расширенное, подробное руководство по логам и форматам артефактов, которые обычно используются в Модуле B (реагирование на инциденты). Здесь указано, **за что отвечает каждый лог**, **какие поля важны**, **примеры строк**, **какие запросы/поведения — подозрительные**, и **команды/фильтры** для поиска индикаторов компрометации (IOC). Документ ориентирован на практическое использование при исследовании инцидентов.
+
+Важно: для каждой секции приведены ссылки на официальную документацию/ресурсы (указаны ниже) — используйте их как reference при сомнениях.
+
+Оглавление
+---------
+1. Общие принципы чтения логов
+2. NGINX — access_log и error_log (формат, поля, подозрительные паттерны)
+3. Apache — access_log (Common/Combined), error_log, mod_security/audit (что смотреть)
+4. Wireshark / pcapng — формат, display-фильтры, подозрительные сигнатуры в трафике
+5. Zeek (Bro) — ключевые логи (conn.log, http.log, dns.log, ssl.log, files.log) и что искать
+6. Suricata / Snort — eve.json и alerts.log (поля, примеры, как парсить)
+7. Системные логи Linux/Unix (auth.log, syslog, journalctl) — какие события означают компрометацию
+8. Windows Event Logs & Sysmon — важные Event ID и что они означают
+9. Базы данных: MySQL/MariaDB/PostgreSQL — какие логи смотреть и подозрительные запросы
+10. Сетевые шлюзы/фаерволы — iptables/ufw/Windows Firewall/NGFW лог-форматы
+11. Практические grep/awk/tshark/zeek/jq-примеры для поиска IOC
+12. Быстрый чек-лист подозрительных предметов для каждого источника
+13. Источники и документация
+
+1) Общие принципы чтения логов
+--------------------------------
+ - Временные метки: нормализуйте все метки в одну зону (рекомендуется UTC). В логах встречаются разные форматы — ISO8601, Apache/Nginx time_local, Windows Event Time. Отклонение во времени — частая причина ошибок при построении timeline.
+ - Поля: при анализе всегда выясняйте, какие поля записываются (обычный "combined" vs кастомный формат). Самые важные поля — client IP, timestamp, request line (method + path + protocol), status code, referer, user-agent, upstream_time/request_time, response size, host/host header, хост-виртуальный (vhost).
+ - Контекст: одиночный 404 мало что значит; всплеск 404/401/403/500 от одного IP или протяжённость серии запросов — индикатор сканирования или эксплуатации.
+ - Цель: отделить "шум" (сканеры ботов, legitimate crawlers) от атак (exploit payloads, SQLi, LFI, RCE, web shells, exfiltration). Используйте списки "legitimate user agents" и threat intel для белых/чёрных списков.
+
+2) NGINX — access_log и error_log
+----------------------------------
+Документация: nginx log_format, ngx_http_log_module. citeturn0search4turn0search0
+
+A) Формат access_log (пример combined + дополнительные переменные)
+ - Пример строки (combined):
+   198.51.100.10 - - [04/Dec/2025:12:34:56 +0000] "GET /index.php?id=1 HTTP/1.1" 200 1234 "https://example.com/" "Mozilla/5.0 (X11; Linux x86_64)"
+ - Переменные (самые важные):
+   - $remote_addr — IP клиента (может быть проксирован; смотрите X-Forwarded-For header)
+   - $time_local — локальное время (по умолчанию), преобразуйте в UTC
+   - $request — строка запроса (метод + uri + протокол)
+   - $status — HTTP статус код (200/404/500/301/403 и т.д.)
+   - $body_bytes_sent — размер тела ответа
+   - $http_referer — реферер (помогает обнаружить exfiltration через реферер spoofing)
+   - $http_user_agent — user-agent (часто подделывается)
+   - $request_time — общее время обработки запроса (важно для обнаружения slowloris/slow POST)
+   - $upstream_response_time — время ответа upstream (если используется reverse proxy)
+   - $host — виртуальный хост (важно при нескольких vhosts на одном IP)
+
+B) error_log
+ - Сообщает об ошибках обработки запросов и внутренних проблемах: 5xx ошибки, проблемы с upstream, скрипт-ошибки, неверные конфиги.
+ - Сообщения из error_log часто содержат путь к файлу, строку и стек — это источник для обнаружения LFI/RCE, если путь приложения появляется в логе.
+
+C) Подозрительные паттерны в nginx-логах
+ - Много подряд 404/401/403 с одного IP → сканирование/брутфорс.
+ - Частые POST-запросы с длинными телами → возможная загрузка веб-оболочки (/upload).
+ - Запросы к /phpinfo.php, /wp-admin/, /administrator/, /.env, /config.php, /.git/config, /.git/HEAD, /server-status, /manager/html — стандартные "разведочные" запросы.
+ - Запросы с URL-энкодированными payload (например, %27, %3C, %3E) — возможные SQLi/XSS/URL-encoded exploits.
+ - Запросы с нестандартными HTTP-методами: PUT, DELETE, PROPFIND, TRACE, OPTIONS — часто используются для атаки или probe.
+ - High request_time или upstream_response_time → possible slowloris / resource exhaustion.
+ - Смешение user-agent (например, User-Agent: sqlmap) — прямой индикатор сканера.
+
+D) Команды для поиска
+```bash
+# Топ IP по количеству запросов
+awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head
+# Найти обращения к .env или .git
+egrep '(\.env|\.git|phpinfo\.php|/config\.php)' /var/log/nginx/access.log -n
+# Поиск потенциальных SQLi (наиболее очевидные токены)
+egrep "(%27|%3D|union|select|information_schema|benchmark|sleep\()" /var/log/nginx/access.log -i
+# Поиск необычных методов
+awk -F\" '{print $2}' /var/log/nginx/access.log | awk '{print $1}' | sort | uniq -c | sort -nr
+```
+(Примеры регулярных выражений можно расширять — см. раздел «Практические примеры»). citeturn0search8
+
+3) Apache — access_log, error_log, mod_security/audit
+------------------------------------------------------
+Документация: Common/Combined Log Format. citeturn0search5
+
+A) Combined Log Format (пример)
+ - Формат (predefined COMMON/COMBINED):
+   `%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"`
+ - Пример строки:
+   203.0.113.20 - - [04/Dec/2025:12:30:01 +0000] "POST /login.php HTTP/1.1" 200 512 "-" "curl/7.58.0"
+
+B) error_log и mod_security
+ - error_log содержит серверные ошибки, предупреждения модулей, стектрейсы PHP и т.д.
+ - mod_security (WAF) может генерировать audit.log с детальной информацией о срабатываниях сигнатур: request headers, body, matched rule id, severity, action (deny/log/redirect).
+ - Если доступен mod_security audit, ищите rule ID с высоким severity и сопутствующие request/response dump. Это часто первое окно в PoC.
+
+C) Подозрительные паттерны (Apache)
+ - Те же, что и в Nginx (/.env, .git, phpinfo.php, admin panels).
+ - Частые 500 Internal Server Error после специфичных запросов — возможная попытка RCE/инъекций.
+ - Заголовки "Authorization: Basic ..." — возможное утечка/подмена хедера.
+ - Mod_security alerts (ACTION=DENY) должны быть рассмотрены и сопоставлены с IP/трафиком.
+
+D) Команды поиска
+```bash
+# Поиск всех 500 ответов за последние 48 часов:
+awk '$9 ~ /^5/ {print $0}' /var/log/apache2/access.log | less
+# Поиск request body в audit.log (примерный путь):
+grep -n "Message: " /var/log/apache2/modsec_audit.log
+# Топ user agents:
+awk -F\" '{print $6}' /var/log/apache2/access.log | sort | uniq -c | sort -nr | head
+```
+
+4) Wireshark / pcapng — формат и анализ сетевого трафика
+---------------------------------------------------------
+Документация: pcapng specification, Wireshark dev pages. citeturn0search2turn0search6
+
+A) PCAP vs PCAPNG
+ - pcapng (PCAP Next Generation) — расширяемый формат, поддерживает multiple interfaces, interface descriptions, name resolution blocks, comments, and per-packet metadata (interface id, drop count). Wireshark по умолчанию сохраняет captures в .pcapng. citeturn0search2turn0search9
+ - При работе с pcapng учитывайте timezone/if_tsresol и интерфейсную информацию — полезно для multi-interface captures.
+
+B) Полезные display-фильтры Wireshark/tshark
+ - http.request.method == "POST"
+ - http.request.uri contains ".env"
+ - tcp.flags.syn == 1 and tcp.flags.ack == 0  — SYN scan (первые пакеты)
+ - ip.addr == 198.51.100.10
+ - tls.handshake.type == 1  — ClientHello (useful to identify TLS initiation)
+ - frame contains "password"  — грубая проверка на plain-text credentials (только в контролируемой среде)
+ - tcp.analysis.retransmission — retransmissions (network issues or attack)
+ - dns.qry.name contains "suspicious" — DNS exfil/lookup
+
+C) Что считается подозрительным в pcap/трафике
+ - Cleartext credentials: HTTP POST с полями username/password в теле.
+ - Large outbound transfers (many MB/GB) на неизвестные IP/домен — возможная утечка данных.
+ - Маленькие пакеты в одну сторону с регулярными интервалами — beacons/C2 callbacks.
+ - Необычные порт-usage: веб-трафик на нестандартных портах (например, HTTP на 8081) — нужно изучить.
+ - TLS с самоподписанными сертификатами, необычные SNI-имена, или несоответствие hostname в сертификате.
+
+D) Команды/примеры tshark
+```bash
+# Top talkers (by IP):
+tshark -r evidence/capture_full.pcapng -q -z io,stat,0,ip
+# Extract HTTP requests with method and URI:
+tshark -r capture.pcapng -Y "http.request" -T fields -e ip.src -e ip.dst -e http.request.method -e http.request.uri -e http.user_agent
+# Extract DNS queries:
+tshark -r capture.pcapng -Y "dns.qry.name" -T fields -e frame.time -e ip.src -e ip.dst -e dns.qry.name
+# Extract files transferred over HTTP:
+tshark -r capture.pcapng --export-objects "http,./extracted_http"
+```
+
+5) Zeek (Bro) — NSM-формат логов и что смотреть
+------------------------------------------------
+Документация: Zeek logs (conn.log, http.log, dns.log, ssl.log, files.log). citeturn0search3turn0search7
+
+A) conn.log (ключевые поля)
+ - ts — timestamp (UTC)
+ - uid — уникальный идентификатор соединения
+ - id.orig_h / id.orig_p — исходный IP/порт
+ - id.resp_h / id.resp_p — адрес/порт ответчика
+ - proto — tcp/udp/icmp
+ - service — http/dns/ssh и т.д (индикация протокола анализа)
+ - duration — продолжительность соединения
+ - orig_bytes / resp_bytes — биты/байты переданы в каждом направлении
+ - conn_state — например, S0, S1, SF, REJ (connection state; S0 — SYN sent but no reply; SF — normal termination)
+ - history — TCP flags history (e.g., "ShADadfF" etc.)
+
+B) http.log (ключевые поля)
+ - ts, uid, id.orig_h, id.resp_h
+ - method — GET/POST/PUT/DELETE
+ - host — Host header
+ - uri — path + query
+ - referrer, user_agent
+ - request_body_len, response_body_len
+ - status_code
+ - tags — теги, например "suspicious" (если policy loaded)
+
+C) dns.log, ssl.log, files.log
+ - dns.log содержит qtypes/qclass и ответные данные (useful for detecting DGA, exfil names)
+ - ssl.log включает certificate_subject, certificate_issuer, version, validation info — useful for suspicious certs
+ - files.log показывает имена/метаданные автоматически извлеченных файлов (filename, sha256) — очень полезно для IOC
+
+D) Что подозрительно в Zeek-логах
+ - Частые короткие соединения к одному IP с маленькими количеством байт — beacons/C2.
+ - HTTP POST к необычным URI с большими request_body_len — возможная загрузка шелла.
+ - DNS запросы к подозрительным доменам или множественные уникальные поддомены — DGA/exfil.
+ - SSL с самоподписанными certs или certs с необычным CN/SAN — возможно C2 TLS.
+
+E) Примеры команд Zeek
+```bash
+# Проанализировать pcap и получить логи:
+zeek -r capture.pcapng
+# Просмотреть top HTTP hosts:
+cat http.log | cut -f 7 | sort | uniq -c | sort -nr | head
+# Найти соединения где conn_state == "S0":
+awk -F'\t' '$8=="S0"{print $0}' conn.log | less
+```
+
+6) Suricata / Snort — IDS/IPS логика и eve.json
+-----------------------------------------------
+Документация: Suricata eve.json format. citeturn0search16
+
+A) eve.json — общая структура
+ - Каждая строка — JSON-объект, описывающий один алерт или событие (http, dns, tls, alert и т.д.)
+ - Поля: timestamp, event_type, src_ip, src_port, dest_ip, dest_port, proto, alert (sid, signature, severity), http (url, headers), tls (sni, certs)
+
+B) Что важно
+ - alert.signature и alert.severity — быстрый индикатор почему сработал
+ - http.request.uri и http.response.code — сопоставьте с access_log
+ - Для поиска быстрых IOC используйте jq:
+```bash
+# Найти все alert события высокого severity:
+jq 'select(.event_type=="alert" and .alert.severity>=2)' eve.json
+# Найти все HTTP alerts с 2xx/3xx/5xx ответами:
+jq 'select(.event_type=="http") | {timestamp: .timestamp, src: .src_ip, uri: .http.url, status: .http.status}' eve.json
+```
+
+C) Подозрительные типы событий
+ - Exploit signatures (SQLi, RCE, Shell upload)
+ - TLS suspicious (self-signed, unusual SNI)
+ - DNS tunneling signatures (long domain names, high entropy)
+
+7) Системные логи Linux/Unix
+----------------------------
+Ключевые файлы и за что отвечают:
+ - /var/log/auth.log OR /var/log/secure — аутентификация и sudo/ssh события (логины, неудачные попытки)
+ - /var/log/syslog, /var/log/messages — общие системные сообщения, демоны
+ - /var/log/kern.log — сообщения ядра (rootkits, kernel exploits могут писать сюда)
+ - /var/log/faillog, /var/log/lastlog — неудачные/последние логины
+ - /var/log/audit/audit.log — auditd & SELinux — file access, executables запуск, sudo usage
+ - journalctl — агрегирует systemd-логи (можно фильтровать по юнитам)
+
+A) Подозрительные записи
+ - Множественные неудачные попытки входа (many 4625/failed login logs) → brute-force
+ - Внезапное создание новых пользователей или добавление в sudoers (/etc/sudoers изменён) — признак компрометации
+ - Удаление логов или обнуление audit (audit.log truncated) — свидетельство попытки сокрыть следы
+ - Неожиданные сервисы, listening на нестандартных портах (проверяйте ss -tunap) — возможный backdoor
+
+B) Поиск по логам (команды)
+```bash
+# Поиск неудачных SSH входов
+grep "Failed password" /var/log/auth.log | awk '{print $1,$2,$3,$11}' | sort | uniq -c | sort -nr
+# Поиск добавления в sudoers (пример)
+grep -R "sudo" /var/log | egrep "added|user|edited|/etc/sudoers" -n
+# Проверить последние команды root в history (только после imaging):
+sudo strings /home/*/.bash_history | tail -n 200
+```
+
+8) Windows Event Logs & Sysmon (ключевые Event ID)
+---------------------------------------------------
+Источники: Microsoft docs, Sysmon reference. (Ссылки внизу.) citeturn0search3turn0search16
+
+A) Важные Windows Event IDs (Security log)
+ - 4624 — Successful logon (различные LogonType дают смысл: 2 — интерактивный, 3 — network/NTLM, 10 — remote/WinRM/RemoteInteractive)
+ - 4625 — Failed logon
+ - 4648 — A logon was attempted using explicit credentials (possible lateral movement)
+ - 4672 — Special privileges assigned to new logon (seAssignPrimaryTokenPrivilege etc.)
+ - 4688 — Process Creation (если включено auditing of process creation; часто полезно — кто запустил cmd/powershell)
+ - 4663 — An attempt was made to access an object (file) — useful for data access
+ - 1102 — The audit log was cleared (suspicious)
+
+B) Sysmon (Microsoft Sysinternals) — ключевые Event IDs
+ - 1 — Process Create (image, commandline, user, parent process)
+ - 3 — Network Connect (src/dst IP, ports, protocol, process that opened the connection)
+ - 6 — Driver Loaded
+ - 7 — Image Loaded (DLLs) — can help find code injection
+ - 8 — CreateRemoteThread (indicator of code injection)
+ - 11 — FileCreate — often used for persistence artifacts
+ - 12 — RegistryObject added/removed (autostart entries)
+ - 13 — RegistryValueSet
+ - 22 — DNSEvent
+ - 23 — FileDelete (suspicious file cleanup)
+(Полный список см. официальную документацию Sysmon). citeturn0search16
+
+C) Что искать
+ - Необычные PowerShell командные строки в EventID 4688/ProcessCreate (encodedcommand, base64 strings)
+ - ProcessCreate с parent process "explorer.exe" или "svchost.exe" запускающие cmd/powershell в нестандартное время
+ - NetworkConnect (Sysmon 3) от служебных сервисов на неизвестные внешние IP (C2)
+ - Event 1102 (audit log cleared) — сигнал к немедленной изоляции и imaging
+
+9) Базы данных — MySQL / PostgreSQL
+-----------------------------------
+A) MySQL/MariaDB (логи)
+ - error log — ошибки запуска/серверные ошибки (обычно /var/log/mysql/error.log)
+ - general query log — все запросы (может быть включён на время расследования)
+ - slow query log — длительные SQL-запросы (может выявить тяжелые операции/exfil)
+ - binary logs — содержат изменения/транзакции (если включены) — useful for data-change analysis
+
+B) Подозрительное поведение в БД
+ - Внезапные DROP/DELETE/'TRUNCATE' запросы — data destruction
+ - SELECT с большим volume (например SELECT * FROM users) и последующие быстрые outbound transfers — возможная data exfiltration
+ - CREATE USER / GRANT / ALTER USER — создание привилегированных учётных записей
+ - Включение general_log на продуктиве без контроля — сам по себе риск, но полезно для расследования
+
+C) PostgreSQL (логи)
+ - postgresql.conf -> logging_collector и log_statement (none, ddl, mod, all)
+ - log_line_prefix часто содержит %t %u %d %p (timestamp, user, database, pid) — важно знать формат
+
+10) Сетевые шлюзы / Firewall / NGFW
+-----------------------------------
+ - iptables/ufw: обычно логируются события DROP/REJECT с указанием chain, src/dst ip/port.
+ - Palo Alto / Fortinet /Cisco ASA: хранят сессии/alerts; ищите blocked/allowed sessions to suspicious IPs.
+ - VPN logs: аутентификация, сессии, исходящие IP (ключ для анализа lateral movement)
+ - Proxy logs (Squid, BlueCoat): детализированные HTTP access logs, полезны для восстановления веб-трафика.
+
+11) Практические шаблоны поиска (grep/awk/tshark/jq)
+----------------------------------------------------
+(Ниже — готовые шаблоны, которые можно запускать в evidence/ директории после копирования логов)
+
+A) Поиск SQLi-похожих payloads в веб-логах
+```bash
+egrep -i "(union(.*?)select|select .* from|information_schema|sleep\(|benchmark\(|or 1=1|-- |;--|%27|%3D|%3B)" /var/log/nginx/access.log | less
+```
+
+B) Поиск LFI/RFI / path traversal
+```bash
+egrep -i "(\.\./|\.\.%2f|/etc/passwd|/proc/self/environ|phar:\/\/|expect://|input|cmd=)" /var/log/nginx/access.log
+```
+
+C) Поиск upload и веб-оболочек
+```bash
+egrep -i "(\.php\?|\.php$|/upload/|multipart/form-data|Content-Disposition: form-data; name=\"file\")" /var/log/nginx/access.log
+# поиск подозрительных .php в /tmp/uploads
+grep -R --include="*.php" -n "/tmp" /var/www /var/tmp
+```
+
+D) Поиск DGA/High-entropy DNS в Zeek dns.log или из pcap
+```bash
+# Вытащить домены и вычислить entropy (пример Python скрипта рекомендуется)
+cut -f 3 dns.log | sort | uniq -c | sort -nr | head
+```
+
+E) Поиск нестандартных HTTP методов в логах (PUT/DELETE/PROPFIND)
+```bash
+awk -F\" '{print $2}' /var/log/nginx/access.log | awk '{print $1}' | sort | uniq -c | sort -nr
+```
+
+F) Поиск известных IOC (IPs/hashes) в pcap/zeek/suricata
+```bash
+# Поиск IP в conn.log
+grep "198.51.100.10" conn.log
+# Поиск hash в files.log:
+grep "d2d2..." files.log
+# jq пример для eve.json:
+jq 'select(.event_type=="alert" and .alert.signature=="ET SQL Tautology")' /var/log/suricata/eve.json
+```
+
+12) Быстрый чек-лист подозрительных предметов (per source)
+-----------------------------------------------------------
+ - Nginx/Apache access_log: много 404/401/403 от одного IP; POST на upload endpoints; запросы к .git/.env/phpinfo.
+ - error_log: стектрейсы, упоминание путей приложения, uncaught exception, warnings с путями.
+ - pcap/pcapng: cleartext credentials, large outbound transfers, periodic small beacons.
+ - Zeek: HTTP POST с большим request_body_len, DNS с высокой энтропией, conn.log с большим количеством S0/REJ.
+ - Suricata: alerts (exploit/shell_upload/sql_injection), TLS anomalies.
+ - System logs: много Failed password; new user creation; audit log cleared.
+ - Windows/Sysmon: ProcessCreate с подозрительными командными строками; NetworkConnect к неизвестным IP; Event 1102 audit cleared.
+ - DB logs: DROP/DELETE/GRANT/CREATE USER; large SELECTs followed by outbound transfers.
+
+13) Источники и документация (ключевые ссылки)
+ - NGINX logging: ngx_http_log_module. citeturn0search4turn0search0
+ - Apache Common/Combined Log Format. citeturn0search5
+ - pcapng format and Wireshark dev pages. citeturn0search2turn0search6
+ - Zeek logs reference (conn.log, http.log, dns.log). citeturn0search3turn0search7
+ - Suricata eve.json / logs overview. citeturn0search16
+
+------------------------------------------
+Конец расширенного руководства.
