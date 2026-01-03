@@ -1,2 +1,6 @@
-sudo rm -rf /etc/default/grub
-sudo cp -r grub /etc/default/
+sudo pacman -Syu
+sudo pacman -S nvidia-dkms nvidia-utils
+
+sudo rm -rf /etc/mkinitcpio.conf
+sudo cp -r mkinitcpio.conf /etc/
+sudo mkinitcpio -P
