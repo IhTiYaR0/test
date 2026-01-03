@@ -1,7 +1,4 @@
-
-# sudo pacman -Syu
-# sudo pacman -S nvidia-dkms nvidia-utils
-
-# sudo mkinitcpio -P
-sudo pacman -Syu xorg-xwayland wayland-protocols
-
+yay -S linux-headers nvidia-dkms qt5-wayland qt5ct libva libva-nvidia-driver-git
+sudo mkinitcpio --config /etc/mkinitcpio.conf --generate /boot/initramfs-custom.img
+sudo sh -c 'echo "options nvidia-drm modeset=1" > /etc/modprobe.d/nvidia.conf'
+sudo reboot
