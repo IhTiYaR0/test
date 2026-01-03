@@ -4,9 +4,15 @@ sudo cp -r ~/test/grub /etc/default/
 # sudo rm -rf /etc/mkinitcpio.conf
 # sudo cp -r ~/test/mkinitcpio.conf /etc/
 
-sudo grub-mkconfig -o /boot/grub/grub.cfg
+# sudo grub-mkconfig -o /boot/grub/grub.cfg
 # sudo mkinitcpio -P
 
 # sudo pacman -Syu nvidia-dkms nvidia-utils lib32-nvidia-utils
 
-sudo reboot
+
+sudo pacman -S nvidia-lts nvidia-utils lib32-nvidia-utils linux-lts-headers
+sudo pacman -S nvidia-open-lts nvidia-utils lib32-nvidia-utils linux-lts-headers
+sudo grub-mkconfig -o /boot/grub/grub.cfg
+sudo mkinitcpio -P
+
+# sudo reboot
